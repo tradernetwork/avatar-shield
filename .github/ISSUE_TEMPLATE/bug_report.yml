@@ -1,0 +1,55 @@
+name: 🐛 Bug report
+description: Something isn't working right
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Please **don't** include your bot token or any secret.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you get instead?
+      placeholder: "Bot didn't post an alert when a copied-avatar account joined..."
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Invited the bot with '...'
+        2. Second account set avatar to admin's picture
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - "Alert-only (ENFORCE_BAN=false)"
+        - "Auto-ban (ENFORCE_BAN=true)"
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Where is it running?
+      placeholder: "Railway / Fly / own Docker host / bare metal"
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Sanity checks
+      options:
+        - label: The **Server Members Intent** is enabled in the Developer Portal
+          required: true
+        - label: I confirmed no secrets are in this report
+          required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste log lines (redact anything sensitive). This will be formatted as code.
+      render: shell
