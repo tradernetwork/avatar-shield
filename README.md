@@ -14,6 +14,12 @@ Avatar Shield fingerprints every admin's avatar and flags anyone wearing a copy.
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Alert-only by default](https://img.shields.io/badge/default-alert--only-brightgreen)
 
+<br/><br/>
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2Ftradernetwork%2Favatar-shield&envs=DISCORD_BOT_TOKEN%2CMOD_LOG_CHANNEL_ID%2CENFORCE_BAN&DISCORD_BOT_TOKENDesc=Bot+token+from+the+Discord+Developer+Portal&MOD_LOG_CHANNEL_IDDesc=Channel+ID+where+alerts+post&ENFORCE_BANDesc=Leave+false+to+start+in+alert-only+mode&ENFORCE_BANDefault=false)
+
+<sub>One click → Railway clones this repo, prompts for your token + channel, and boots it. Still do Phase 1 (create the app + turn on Server Members Intent) first. 👇</sub>
+
 </div>
 
 ---
@@ -110,13 +116,18 @@ Send the URL to the server owner → **Authorize**. Then in the server:
 The bot holds a live gateway connection — it can't run serverless/cron. Pick one:
 
 <details open>
-<summary>🚂 <b>Railway (easiest, ~$5/mo)</b></summary>
+<summary>🚂 <b>Railway — one click (easiest, ~$5/mo)</b></summary>
 
-1. [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub
-   repo** → pick this repo. (Railway reads `railway.json` + the `Dockerfile`.)
-2. **Variables** → add `DISCORD_BOT_TOKEN`, `MOD_LOG_CHANNEL_ID`, and
-   `ENFORCE_BAN=false`.
-3. Deploy → watch logs for `Avatar Shield online ...`.
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2Ftradernetwork%2Favatar-shield&envs=DISCORD_BOT_TOKEN%2CMOD_LOG_CHANNEL_ID%2CENFORCE_BAN&DISCORD_BOT_TOKENDesc=Bot+token+from+the+Discord+Developer+Portal&MOD_LOG_CHANNEL_IDDesc=Channel+ID+where+alerts+post&ENFORCE_BANDesc=Leave+false+to+start+in+alert-only+mode&ENFORCE_BANDefault=false)
+
+The button clones this repo, prompts for your **token + mod-log channel**
+(`ENFORCE_BAN` pre-filled to `false`), and boots it — Railway reads
+`railway.json` + the `Dockerfile`. Watch the deploy logs for
+`Avatar Shield online ...`.
+
+Prefer to wire it by hand? [railway.app](https://railway.app) → **New Project**
+→ **Deploy from GitHub repo** → pick this repo → add the three variables under
+**Variables**.
 </details>
 
 <details>
