@@ -1,0 +1,12 @@
+.git
+.github
+docs
+*.md
+!requirements.txt
+.env
+.env.*
+!.env.example
+__pycache__
+*.pyc
+.venv
+venv

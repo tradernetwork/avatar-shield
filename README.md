@@ -13,6 +13,9 @@ Avatar Shield fingerprints every admin's avatar and flags anyone wearing a copy.
 ![discord.py](https://img.shields.io/badge/discord.py-2.5-5865F2?logo=discord&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Alert-only by default](https://img.shields.io/badge/default-alert--only-brightgreen)
+<br/>
+[![CI](https://github.com/tradernetwork/avatar-shield/actions/workflows/ci.yml/badge.svg)](https://github.com/tradernetwork/avatar-shield/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tradernetwork/avatar-shield?color=blue)](https://github.com/tradernetwork/avatar-shield/releases/latest)
 
 <br/><br/>
 
