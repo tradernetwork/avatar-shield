@@ -21,6 +21,11 @@ quiet server finally proves it's working.
 - 🧪 **Unit tests** (`pytest -q`) covering pHash matching, the re-encode/resize
   claim, tier thresholds, channel-map parsing and the avatar rules — no Discord
   connection needed. CI now runs them on Python 3.11 / 3.12 / 3.13.
+- 👤 **`PROTECTED_USER_IDS`** — protect faces that don't hold Administrator in
+  the watching server. The admin permission is the wrong set whenever the person
+  being copied isn't staff there. Listed users are fingerprinted in every server
+  the bot is in, never flagged themselves, and named in a startup warning when
+  they aren't a member of a given server.
 - 🔗 `make_invite.py --guild <SERVER_ID>` pins an invite to one server.
 
 ### Fixed
@@ -42,6 +47,8 @@ quiet server finally proves it's working.
   / `ValueError` at import.
 
 ### Changed
+- 🏷️ "admin" → "protected member" throughout (alert embeds, ban reasons, logs),
+  now that the protected set is more than just Administrators.
 - ⚠️ `member.ban(delete_message_days=…)` → `delete_message_seconds=…`
   (the former is deprecated in discord.py 2.x).
 - 📌 Dependencies pinned to major ranges: `discord.py>=2.5,<3`,

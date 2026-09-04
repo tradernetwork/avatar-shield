@@ -90,8 +90,8 @@ def test_phash_unrelated_images_are_far_apart():
 
 
 # ---- best_match ----------------------------------------------------------
-def _entry(user_id: int, seed: int) -> shield._AdminEntry:
-    return shield._AdminEntry(user_id, shield.phash_from_bytes(_png(_avatar(seed))))
+def _entry(user_id: int, seed: int) -> shield._ProtectedEntry:
+    return shield._ProtectedEntry(user_id, shield.phash_from_bytes(_png(_avatar(seed))), "admin")
 
 
 def test_best_match_none_when_nothing_resembles():
@@ -118,7 +118,7 @@ def test_best_match_respects_the_alert_band():
 
 
 def test_best_match_excludes_the_subject_themselves():
-    """An admin must never be flagged for wearing their own face."""
+    """A protected member must never be flagged for wearing their own face."""
     admins = [_entry(100, 51)]
     subject = shield.phash_from_bytes(_png(_avatar(51)))
     assert shield.best_match(subject, admins, exclude_user_id=100) is None
@@ -127,8 +127,8 @@ def test_best_match_excludes_the_subject_themselves():
 def test_best_match_picks_the_closest_admin():
     target = _avatar(61)
     admins = [
-        shield._AdminEntry(100, shield.phash_from_bytes(_png(_avatar(62)))),
-        shield._AdminEntry(101, shield.phash_from_bytes(_png(target))),
+        shield._ProtectedEntry(100, shield.phash_from_bytes(_png(_avatar(62))), "admin"),
+        shield._ProtectedEntry(101, shield.phash_from_bytes(_png(target)), "admin"),
     ]
     subject = shield.phash_from_bytes(_png(target))
     match = shield.best_match(subject, admins, threshold_ban=64, threshold_alert=64)
@@ -176,3 +176,19 @@ def test_env_int_falls_back_on_junk(monkeypatch):
     assert shield._env_int("AS_TEST_INT", 6) == 6
     monkeypatch.setenv("AS_TEST_INT", "9")
     assert shield._env_int("AS_TEST_INT", 6) == 9
+
+
+# ---- parse_id_list -------------------------------------------------------
+def test_parse_id_list_empty():
+    assert shield.parse_id_list("") == set()
+
+
+def test_parse_id_list_accepts_commas_spaces_and_newlines():
+    raw = "350718254584561666, 493229277714710529\n541755648162136065 189458608679813120"
+    assert shield.parse_id_list(raw) == {
+        350718254584561666, 493229277714710529, 541755648162136065, 189458608679813120,
+    }
+
+
+def test_parse_id_list_skips_junk_without_raising():
+    assert shield.parse_id_list("123,notanid,456") == {123, 456}

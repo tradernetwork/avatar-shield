@@ -64,10 +64,11 @@ Avatar Shield closes that gap. 👇
 - 📏 **Two tiers.** A very close match (Hamming distance ≤ `6`) is **ban-tier**;
   a looser resemblance (≤ `10`) is **alert-tier** (posted for a human to review,
   never actioned).
-- 🔁 **Zero maintenance.** The admin fingerprint set is derived automatically
-  from anyone with the **Administrator** permission — built at startup, refreshed
-  hourly, and rebuilt the moment an admin changes their own picture. No database,
-  no config file, no admin list to keep updated.
+- 🔁 **Zero maintenance.** The protected set is derived automatically from
+  anyone with the **Administrator** permission — built at startup, refreshed
+  hourly, and rebuilt the moment one of them changes their own picture. No
+  database, no config file, no list to keep updated. Need to protect someone
+  who *isn't* staff in that server? Name them in `PROTECTED_USER_IDS`.
 - 🖐️ **Proof of life.** On boot it posts `Watching N admin avatars` to each
   server's mod-log, so a quiet week reads as *"nobody tried it"* rather than
   *"is this thing even on?"*. Set `STARTUP_NOTICE=false` to silence it.
@@ -176,6 +177,7 @@ docker run -d --restart=unless-stopped --env-file .env --name avatar-shield avat
 | `DISCORD_BOT_TOKEN` | ✅ | — | Bot token from the Developer Portal |
 | `MOD_LOG_CHANNEL_ID` | ✳️ | — | Default channel ID where alerts / ban cards post. Applies only to the server that channel is actually in. |
 | `MOD_LOG_CHANNELS` | ✳️ | — | Per-server routing: `guildID:channelID,guildID:channelID`. Wins over `MOD_LOG_CHANNEL_ID`. |
+| `PROTECTED_USER_IDS` | | — | Extra user IDs to protect beyond Administrators, comma-separated. Applies in every server. |
 | `ENFORCE_BAN` | | `false` | `true` = auto-ban ban-tier matches (needs Ban perm + role position) |
 | `STARTUP_NOTICE` | | `true` | Post an "online, watching N admin avatars" card to each mod-log at boot |
 | `THRESHOLD_BAN` | | `6` | pHash distance ≤ this ⇒ **ban** tier |
@@ -225,6 +227,27 @@ Run it alert-only for a few days and watch the mod-log. When you trust it:
 
 Ban-tier matches now get banned automatically (with a 24-hour message purge);
 alert-tier matches still just post for review.
+
+---
+
+## 👤 Protecting someone who isn't an admin here
+
+The Administrator permission is a good default for *"who gets impersonated"*,
+but it's the wrong set whenever the face being copied doesn't belong to staff of
+the watching server — a community owner hanging out in a friend's server, a
+public figure, a support account.
+
+```bash
+PROTECTED_USER_IDS=350718254584561666,493229277714710529
+```
+
+Those users are fingerprinted in **every** server the bot is in, protected there
+whether or not they hold any permission, and never flagged themselves. If one of
+them isn't a member of a given server (or has no avatar), startup says so by ID
+rather than silently protecting nobody.
+
+**This does not reach outside your servers.** It protects the listed face
+*within* servers the bot watches — see the loophole below for what no bot can do.
 
 ---
 

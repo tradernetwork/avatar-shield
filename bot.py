@@ -21,14 +21,15 @@ Setup
      DISCORD_BOT_TOKEN=...        # bot token
      MOD_LOG_CHANNEL_ID=...       # default channel where alerts are posted
      MOD_LOG_CHANNELS=...         # optional per-guild override, guild:channel,...
+     PROTECTED_USER_IDS=...       # optional extra faces to protect (non-admins)
      ENFORCE_BAN=false            # true = auto-ban ban-tier matches (needs Ban perm)
      THRESHOLD_BAN=6              # <= this distance = ban tier
      THRESHOLD_ALERT=10           # <= this distance = alert tier
 4. python bot.py
 
-The admin fingerprint set is derived automatically from anyone with the
-Administrator permission, warmed at startup and refreshed hourly. No database
-required — the cache lives in memory.
+The protected set is derived automatically from anyone with the Administrator
+permission, plus anyone named in PROTECTED_USER_IDS — warmed at startup and
+refreshed hourly. No database required; the cache lives in memory.
 """
 from __future__ import annotations
 
@@ -102,6 +103,29 @@ if _default_log_raw:
         log.warning("MOD_LOG_CHANNEL_ID=%r is not numeric — ignoring", _default_log_raw)
 
 MOD_LOG_CHANNELS: dict[int, int] = parse_channel_map(os.environ.get("MOD_LOG_CHANNELS", ""))
+
+
+def parse_id_list(raw: str) -> set[int]:
+    """Parse a comma/space/newline separated list of Discord snowflakes."""
+    out: set[int] = set()
+    for chunk in raw.replace(";", ",").replace("\n", ",").replace(" ", ",").split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        try:
+            out.add(int(item))
+        except ValueError:
+            log.warning("PROTECTED_USER_IDS: skipping %r (ids must be numeric)", item)
+    return out
+
+
+# People whose face is protected even though they don't hold Administrator here.
+# The admin permission is a good default for "who gets impersonated", but it is
+# the wrong set whenever the person being copied isn't staff in the server doing
+# the watching — a community owner in a friend's server, a public figure, a
+# support account. Listed users are protected in every guild the bot is in,
+# and are never flagged themselves.
+PROTECTED_USER_IDS: set[int] = parse_id_list(os.environ.get("PROTECTED_USER_IDS", ""))
 ENFORCE_BAN = _env_flag("ENFORCE_BAN", False)
 STARTUP_NOTICE = _env_flag("STARTUP_NOTICE", True)
 THRESHOLD_BAN = _env_int("THRESHOLD_BAN", 6)
@@ -132,14 +156,15 @@ BAN_PURGE_SECONDS = 86400         # delete a banned impersonator's last day of m
 
 # ---- Cache types ---------------------------------------------------------
 @dataclass
-class _AdminEntry:
+class _ProtectedEntry:
     user_id: int
     phash: imagehash.ImageHash
+    reason: str  # 'admin' | 'listed'
 
 
 @dataclass
 class _GuildCache:
-    admins: list[_AdminEntry] = field(default_factory=list)
+    protected: list[_ProtectedEntry] = field(default_factory=list)
     refreshed_at: float = 0.0
 
 
@@ -185,6 +210,11 @@ def _is_admin(member: discord.Member) -> bool:
         return False
 
 
+def _is_protected(member: discord.Member) -> bool:
+    """Members who ARE the protected set — never flagged for their own face."""
+    return member.id in PROTECTED_USER_IDS or _is_admin(member)
+
+
 # ---- pHash computation ---------------------------------------------------
 async def _fetch_avatar_bytes(asset: discord.Asset) -> Optional[bytes]:
     try:
@@ -222,25 +252,37 @@ async def _compute_phash(member: discord.abc.User) -> Optional[imagehash.ImageHa
 
 
 # ---- Admin cache ---------------------------------------------------------
-async def _refresh_admins(guild: discord.Guild) -> _GuildCache:
+async def _refresh_protected(guild: discord.Guild) -> _GuildCache:
     cache = _GuildCache(refreshed_at=time.time())
-    admins = [
-        m for m in guild.members
-        if not m.bot and _has_custom_avatar(m) and _is_admin(m)
-    ]
+    people: list[tuple[discord.Member, str]] = []
+    for m in guild.members:
+        if m.bot or not _has_custom_avatar(m):
+            continue
+        if m.id in PROTECTED_USER_IDS:
+            people.append((m, "listed"))
+        elif _is_admin(m):
+            people.append((m, "admin"))
 
-    if admins:
+    if people:
         results = await asyncio.gather(
-            *(_compute_phash(m) for m in admins), return_exceptions=True
+            *(_compute_phash(m) for m, _ in people), return_exceptions=True
         )
-        for m, r in zip(admins, results):
+        for (m, reason), r in zip(people, results):
             if isinstance(r, imagehash.ImageHash):
-                cache.admins.append(_AdminEntry(user_id=m.id, phash=r))
+                cache.protected.append(_ProtectedEntry(user_id=m.id, phash=r, reason=reason))
 
+    listed = sum(1 for e in cache.protected if e.reason == "listed")
     log.info(
-        "guild %s (%s): cached %d admin fingerprints (of %d admins with avatars)",
-        guild.id, guild.name, len(cache.admins), len(admins),
+        "guild %s (%s): cached %d protected fingerprints (%d admin, %d listed)",
+        guild.id, guild.name, len(cache.protected), len(cache.protected) - listed, listed,
     )
+    missing = PROTECTED_USER_IDS - {m.id for m, _ in people}
+    if missing:
+        log.warning(
+            "guild %s (%s): PROTECTED_USER_IDS %s are not members here (or have no "
+            "avatar) — their face is NOT protected in this server",
+            guild.id, guild.name, ", ".join(str(i) for i in sorted(missing)),
+        )
     _cache[guild.id] = cache
     return cache
 
@@ -249,21 +291,21 @@ async def _get_cache(guild: discord.Guild) -> _GuildCache:
     c = _cache.get(guild.id)
     if c is not None and (time.time() - c.refreshed_at) < ADMIN_HASH_TTL_S:
         return c
-    return await _refresh_admins(guild)
+    return await _refresh_protected(guild)
 
 
 # ---- Match ---------------------------------------------------------------
 def best_match(
     subject: imagehash.ImageHash,
-    admins: Iterable[_AdminEntry],
+    protected: Iterable[_ProtectedEntry],
     *,
     exclude_user_id: Optional[int] = None,
     threshold_ban: int = THRESHOLD_BAN,
     threshold_alert: int = THRESHOLD_ALERT,
 ) -> Optional[AvatarMatch]:
-    """Closest admin within the alert threshold, or None. Pure — unit-testable."""
+    """Closest protected face within the alert threshold, or None. Pure — unit-testable."""
     best: Optional[AvatarMatch] = None
-    for entry in admins:
+    for entry in protected:
         if exclude_user_id is not None and entry.user_id == exclude_user_id:
             continue
         distance = subject - entry.phash
@@ -278,18 +320,18 @@ def best_match(
 async def check_member(member: discord.Member) -> Optional[AvatarMatch]:
     if member.bot or not _has_custom_avatar(member):
         return None
-    if _is_admin(member):
-        return None  # admins ARE the protected set
+    if _is_protected(member):
+        return None  # they ARE the protected set
 
     cache = await _get_cache(member.guild)
-    if not cache.admins:
+    if not cache.protected:
         return None
 
     mhash = await _compute_phash(member)
     if mhash is None:
         return None
 
-    return best_match(mhash, cache.admins, exclude_user_id=member.id)
+    return best_match(mhash, cache.protected, exclude_user_id=member.id)
 
 
 # ---- Bot -----------------------------------------------------------------
@@ -387,7 +429,7 @@ async def _post_and_maybe_ban(member: discord.Member, match: AvatarMatch, trigge
     if match.severity == "ban" and ENFORCE_BAN:
         try:
             await member.ban(
-                reason=f"Avatar impersonation of admin {match.impersonated_user_id} "
+                reason=f"Avatar impersonation of protected member {match.impersonated_user_id} "
                        f"(pHash distance={match.distance}, trigger={trigger})",
                 delete_message_seconds=BAN_PURGE_SECONDS,
             )
@@ -406,7 +448,7 @@ async def _post_and_maybe_ban(member: discord.Member, match: AvatarMatch, trigge
 
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="User", value=f"{member.mention} (`{member}` · `{member.id}`)", inline=False)
-    embed.add_field(name="Resembles admin", value=target, inline=False)
+    embed.add_field(name="Resembles protected member", value=target, inline=False)
     embed.add_field(name="pHash distance", value=f"**{match.distance}** (ban ≤{THRESHOLD_BAN}, alert ≤{THRESHOLD_ALERT})", inline=True)
     embed.add_field(name="Action", value=action, inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
@@ -463,25 +505,25 @@ async def _warm_up(guilds: Optional[Iterable[discord.Guild]] = None) -> None:
     """
     for guild in (bot.guilds if guilds is None else guilds):
         try:
-            cache = await _refresh_admins(guild)
+            cache = await _refresh_protected(guild)
         except Exception as e:  # noqa: BLE001
             log.warning("warm-up failed for guild %s: %s", guild.id, e)
             continue
 
         channel = resolve_mod_log(guild)
         log.info(
-            "guild %s (%s): mod-log=%s, admins=%d, enforce_ban=%s",
+            "guild %s (%s): mod-log=%s, protected=%d, enforce_ban=%s",
             guild.id, guild.name,
             f"#{channel.name}" if channel else "NONE",
-            len(cache.admins), ENFORCE_BAN,
+            len(cache.protected), ENFORCE_BAN,
         )
         if STARTUP_NOTICE and channel is not None:
             mode = "auto-ban armed" if ENFORCE_BAN else "alert-only"
             embed = discord.Embed(
                 title="🛡️ Avatar Shield online",
                 description=(
-                    f"Watching **{len(cache.admins)}** admin avatar"
-                    f"{'' if len(cache.admins) == 1 else 's'} in **{guild.name}** — {mode}.\n"
+                    f"Watching **{len(cache.protected)}** protected avatar"
+                    f"{'' if len(cache.protected) == 1 else 's'} in **{guild.name}** — {mode}.\n"
                     f"Ban ≤{THRESHOLD_BAN} · alert ≤{THRESHOLD_ALERT} pHash distance."
                 ),
                 color=0x43A047,
@@ -537,7 +579,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     # An admin changing their OWN avatar must re-fingerprint immediately.
     # check_member skips admins, so without this the new face stays unprotected
     # until the hourly TTL — a window an impersonator can copy into.
-    if admin_changed or (avatar_changed and _is_admin(after)):
+    if admin_changed or (avatar_changed and _is_protected(after)):
         _invalidate(after.guild.id)
     if avatar_changed:
         await _check(after, trigger="avatar_change")
@@ -552,7 +594,7 @@ async def on_user_update(before: discord.User, after: discord.User):
         m = guild.get_member(after.id)
         if m is None:
             continue
-        if _is_admin(m):
+        if _is_protected(m):
             _invalidate(guild.id)
             continue
         await _check(m, trigger="global_avatar_change")
@@ -571,6 +613,8 @@ def main() -> None:
             "try to auto-discover a channel named one of: %s",
             ", ".join(DISCOVER_CHANNEL_NAMES),
         )
+    if PROTECTED_USER_IDS:
+        log.info("PROTECTED_USER_IDS: %s", ", ".join(str(i) for i in sorted(PROTECTED_USER_IDS)))
     bot.run(token)
 
 
