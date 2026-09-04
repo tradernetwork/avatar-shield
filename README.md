@@ -9,8 +9,8 @@
 Name filters change the name. Scammers don't — they change the _face_.
 Avatar Shield fingerprints every admin's avatar and flags anyone wearing a copy.
 
-![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)
-![discord.py](https://img.shields.io/badge/discord.py-2.5-5865F2?logo=discord&logoColor=white)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue?logo=python&logoColor=white)
+![discord.py](https://img.shields.io/badge/discord.py-2.5%2B-5865F2?logo=discord&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Alert-only by default](https://img.shields.io/badge/default-alert--only-brightgreen)
 <br/>
@@ -58,13 +58,19 @@ Avatar Shield closes that gap. 👇
   lightly crops** the image.
 - 👀 **Watches the right events.** On every member **join**, **avatar change**,
   and **global avatar swap**, the newcomer's avatar is hashed and compared to the
-  admin set. Close match → alert.
+  admin set. Close match → alert. **Per-server profile pictures count too** —
+  that's the sneaky one, since a scammer can wear an admin's face in *your*
+  server only and look totally clean everywhere else.
 - 📏 **Two tiers.** A very close match (Hamming distance ≤ `6`) is **ban-tier**;
   a looser resemblance (≤ `10`) is **alert-tier** (posted for a human to review,
   never actioned).
 - 🔁 **Zero maintenance.** The admin fingerprint set is derived automatically
-  from anyone with the **Administrator** permission and refreshed hourly. No
-  database, no config file, no admin list to keep updated.
+  from anyone with the **Administrator** permission — built at startup, refreshed
+  hourly, and rebuilt the moment an admin changes their own picture. No database,
+  no config file, no admin list to keep updated.
+- 🖐️ **Proof of life.** On boot it posts `Watching N admin avatars` to each
+  server's mod-log, so a quiet week reads as *"nobody tried it"* rather than
+  *"is this thing even on?"*. Set `STARTUP_NOTICE=false` to silence it.
 
 > **Free tier = alert-only.** Out of the box it **never bans, mutes, or touches
 > anyone** — it just tells your mods. Flip one env var to `true` when you're
@@ -99,6 +105,13 @@ That prints an invite with **View Channels, Send Messages, Embed Links, Read
 Message History, and Ban Members**. (Ban is included so you never have to
 re-invite when you enable auto-ban — the bot won't touch anyone until you set
 `ENFORCE_BAN=true`.) Want a zero-ban invite to start? Add `--alert`.
+
+Handing the link to someone else? Pin it to their server so it can't land in the
+wrong one:
+
+```bash
+python make_invite.py <APPLICATION_ID> --guild <SERVER_ID>
+```
 
 Send the URL to the server owner → **Authorize**. Then in the server:
 
@@ -161,13 +174,47 @@ docker run -d --restart=unless-stopped --env-file .env --name avatar-shield avat
 | Env var | Required | Default | Meaning |
 |---|:---:|:---:|---|
 | `DISCORD_BOT_TOKEN` | ✅ | — | Bot token from the Developer Portal |
-| `MOD_LOG_CHANNEL_ID` | ✅ | — | Channel ID where alerts / ban cards post |
+| `MOD_LOG_CHANNEL_ID` | ✳️ | — | Default channel ID where alerts / ban cards post. Applies only to the server that channel is actually in. |
+| `MOD_LOG_CHANNELS` | ✳️ | — | Per-server routing: `guildID:channelID,guildID:channelID`. Wins over `MOD_LOG_CHANNEL_ID`. |
 | `ENFORCE_BAN` | | `false` | `true` = auto-ban ban-tier matches (needs Ban perm + role position) |
+| `STARTUP_NOTICE` | | `true` | Post an "online, watching N admin avatars" card to each mod-log at boot |
 | `THRESHOLD_BAN` | | `6` | pHash distance ≤ this ⇒ **ban** tier |
 | `THRESHOLD_ALERT` | | `10` | pHash distance ≤ this ⇒ **alert** tier (review) |
 
+✳️ Set **at least one** of `MOD_LOG_CHANNEL_ID` / `MOD_LOG_CHANNELS`. With
+neither, the bot falls back to auto-discovery (below) and logs a warning.
+
 Thresholds are out of 64 bits — **lower = stricter.** Getting false positives?
 Lower `THRESHOLD_ALERT`. Missing near-copies? Raise it, carefully.
+
+## 🌐 Running one bot in several servers
+
+One deployment can shield as many servers as you like — invite it to each, then
+tell it where each server's alerts go:
+
+```bash
+MOD_LOG_CHANNELS=111111111111111111:222222222222222222,333333333333333333:444444444444444444
+#                ^ server A          ^ its mod-log      ^ server B          ^ its mod-log
+```
+
+Order of resolution, per server:
+
+1. **`MOD_LOG_CHANNELS`** entry for that server ID — always wins.
+2. **`MOD_LOG_CHANNEL_ID`**, but only if that channel really is in that server.
+3. **Auto-discovery** — the first channel the bot can post in named
+   `avatar-shield`, `mod-log`, `mod-logs`, `modlog`, `admin-log`, `staff-log`,
+   `security`, or `alerts`.
+4. Nothing → a loud startup warning naming the server, and alerts there are
+   dropped rather than misrouted.
+
+> ⚠️ **Upgrading from a single-server install?** `MOD_LOG_CHANNEL_ID` alone used
+> to be the only option, and a second server's alerts had nowhere to land. Add a
+> `MOD_LOG_CHANNELS` entry (or a `#mod-log` channel) for every new server.
+
+Admin fingerprints, thresholds and enforcement are per-deployment, not
+per-server — every server is watched with the same settings.
+
+---
 
 ## 🔨 Turning on auto-ban
 
@@ -176,7 +223,7 @@ Run it alert-only for a few days and watch the mod-log. When you trust it:
 1. Confirm the `Avatar Shield` role sits **above** the roles it would ban.
 2. Set `ENFORCE_BAN=true` and redeploy/restart.
 
-Ban-tier matches now get banned automatically (with a 1-day message purge);
+Ban-tier matches now get banned automatically (with a 24-hour message purge);
 alert-tier matches still just post for review.
 
 ---
@@ -200,12 +247,33 @@ wrote a drop-in, copy-paste safety notice for you to pin — the headline rule:
 
 ## 🩺 Troubleshooting
 
+Every boot logs one line per server:
+`guild <id> (<name>): mod-log=#alerts, admins=4, enforce_ban=False`. Read that
+first — it answers most of these on sight.
+
 | Symptom | Fix |
 |---|---|
 | Online but never reacts | Server Members Intent is **off** (Phase 1.3), or the impersonator has Administrator (admins are the *protected* set, never flagged) |
-| `mod-log channel ... not found` | Wrong `MOD_LOG_CHANNEL_ID`, or the bot can't see it — grant its role View Channel + Send Messages on that channel |
+| `admins=0` at startup | Nobody in that server has the Administrator permission *and* a custom avatar — there is nothing to protect yet |
+| `NO mod-log channel — alerts have nowhere to go` | That server isn't in `MOD_LOG_CHANNELS` and has no discoverable channel. Add `MOD_LOG_CHANNELS=<guildID>:<channelID>` |
+| Alerts land in one server but not another | Classic single-server config — see [Running one bot in several servers](#-running-one-bot-in-several-servers) |
+| `cannot post in #x` / `is configured but the bot lacks…` | Grant the bot's role explicit green ✅ View Channel + Send Messages + Embed Links there (gray "neutral" inherits an `@everyone` deny) |
 | `ban forbidden — check bot role position` | The `Avatar Shield` role is below the person's role — drag it up |
 | Nothing at all | Wrong token, or the app didn't actually join (Server Settings → Integrations) |
+
+---
+
+## 🧪 Developing
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+The tests cover the pure logic — pHash matching (including the re-encode /
+resize claim), the tier thresholds, per-server channel parsing, and the
+server-avatar rule — with no Discord connection and no token. CI runs them on
+Python 3.11 / 3.12 / 3.13.
 
 ---
 

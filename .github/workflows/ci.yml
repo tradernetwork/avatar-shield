@@ -6,15 +6,21 @@ on:
   pull_request:
 
 jobs:
-  compile:
-    name: Byte-compile
+  test:
+    name: Compile + test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
       - name: Byte-compile sources
         run: python -m py_compile bot.py make_invite.py
+      - name: Run tests
+        run: pytest -q

@@ -10,3 +10,6 @@ __pycache__
 *.pyc
 .venv
 venv
+test_bot.py
+requirements-dev.txt
+.pytest_cache
