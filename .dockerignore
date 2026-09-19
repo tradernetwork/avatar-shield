@@ -11,5 +11,10 @@ __pycache__
 .venv
 venv
 test_bot.py
+test_settings_store.py
+conftest.py
 requirements-dev.txt
 .pytest_cache
+*.db
+*.db-wal
+*.db-shm
