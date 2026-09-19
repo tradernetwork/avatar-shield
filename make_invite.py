@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Print the OAuth2 invite URL for the Avatar Shield bot.
 
+The invite includes the `applications.commands` scope so slash commands
+(`/shield ...`) are usable in the server.
+
 Usage:
     python make_invite.py <APPLICATION_ID>                # with Ban Members (recommended)
     python make_invite.py <APPLICATION_ID> --alert        # alert-only, no Ban perm
@@ -31,7 +34,7 @@ def build_url(app_id: str, *, alert_only: bool = False, guild_id: str | None = N
     params = {
         "client_id": app_id,
         "permissions": ALERT_ONLY if alert_only else WITH_BAN,
-        "scope": "bot",
+        "scope": "bot applications.commands",
     }
     if guild_id:
         params["guild_id"] = guild_id

@@ -4,6 +4,60 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — self-serve, multi-server release
+
+Any community owner can now add the bot and configure it entirely themselves
+in Discord, with zero env-var edits, redeploys, or help from us. The original
+single-server deployment keeps running unchanged.
+
+### Added
+- 🎛️ **`/shield` slash commands** (`app_commands.CommandTree`, synced
+  globally): `setup`, `protect`, `unprotect`, `mode`, `status`, `test`, and
+  `scan`. All require **Manage Server** and are guild-only. `setup` verifies
+  the bot can actually post in the chosen channel before saving it; `mode
+  mode:ban` verifies **Ban Members** and role position first and explains
+  what's missing if it can't switch yet.
+- 🗄️ **Per-server settings in SQLite** (`settings_store.py`, stdlib
+  `sqlite3` only — no new dependency). Path from `AVATAR_SHIELD_DB` (default
+  `/data/avatar-shield.db`), with an automatic fallback to `./avatar-shield.db`
+  plus a clear warning log if that directory isn't writable (e.g. no volume
+  mounted). Per guild: alert channel, mode (alert/ban), extra protected user
+  IDs, optional threshold overrides.
+- 👋 **Onboarding on join** (`on_guild_join`): a welcome card posted to the
+  system channel (or the first channel the bot can post in) explaining what
+  the bot does, that it's alert-only by default, and the two-step setup.
+- 🔗 **`applications.commands` OAuth2 scope** added to `make_invite.py`'s
+  generated URLs, required for slash commands to work at all.
+- 📎 Ready-to-click **"Add to Discord"** links in the README for application
+  `1529272730334265415` — alert-only by default, plus a Ban Members variant —
+  with the primary setup path now "click the link → `/shield setup`".
+- 🧪 21 new tests: SQLite settings persistence and resolution order
+  (`test_settings_store.py`), and the `/shield mode` permission/validation
+  and mode/threshold resolution logic (`test_bot.py`).
+
+### Changed
+- **Resolution order, every setting:** per-guild `/shield` DB setting →
+  existing env var (`MOD_LOG_CHANNEL_ID`/`MOD_LOG_CHANNELS`/`ENFORCE_BAN`/
+  `THRESHOLD_BAN`/`THRESHOLD_ALERT`) → existing channel-name auto-discovery
+  (alert channel only). `PROTECTED_USER_IDS` (env) remains global and additive
+  to any per-guild `/shield protect` entries — unchanged for backward
+  compatibility.
+- `bot.py` now subclasses `discord.Client` (`AvatarShieldClient`) to add
+  `setup_hook`, which syncs slash commands on boot. All existing `@bot.event`
+  handlers are unchanged.
+- `Dockerfile` now also copies `settings_store.py` and declares a `/data`
+  volume.
+
+### Deploy notes
+- **New env var:** `AVATAR_SHIELD_DB` (optional, default `/data/avatar-shield.db`).
+- **Mount a persistent volume** at that path's directory (`/data` by default)
+  on Railway/Fly/Docker, or `/shield` settings are lost on every restart —
+  the bot still runs, but logs a clear warning and falls back to a
+  non-persistent local file.
+- The existing single-server deployment needs **no configuration changes** —
+  it has no `/shield` settings saved, so every lookup falls straight through
+  to its current env vars, identical to before this release.
+
 ## [1.1.0] — 2026-09-03
 
 Multi-server release. One deployment can now shield several servers, and a
