@@ -8,7 +8,7 @@
 
 <!-- Impersonation logic breaks subtly. Describe your test against a throwaway server. -->
 
-- [ ] Ran `python -m py_compile bot.py make_invite.py`
+- [ ] Ran `python -m py_compile bot.py settings_store.py make_invite.py`
 - [ ] Tested against a **throwaway** server I own (not a live community)
 - [ ] No secrets committed (`.env` is not staged)
 

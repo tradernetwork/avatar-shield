@@ -21,6 +21,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
       - name: Byte-compile sources
-        run: python -m py_compile bot.py make_invite.py
+        run: python -m py_compile bot.py settings_store.py make_invite.py
       - name: Run tests
         run: pytest -q

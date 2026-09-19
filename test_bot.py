@@ -192,3 +192,75 @@ def test_parse_id_list_accepts_commas_spaces_and_newlines():
 
 def test_parse_id_list_skips_junk_without_raising():
     assert shield.parse_id_list("123,notanid,456") == {123, 456}
+
+
+# ---- resolve_mode / resolve_thresholds (DB > env resolution order) -------
+def test_resolve_mode_falls_back_to_enforce_ban_env_true(monkeypatch):
+    guild_id = 900000000000000001
+    monkeypatch.setattr(shield, "ENFORCE_BAN", True)
+    assert shield.resolve_mode(guild_id) == "ban"
+
+
+def test_resolve_mode_falls_back_to_enforce_ban_env_false(monkeypatch):
+    guild_id = 900000000000000002
+    monkeypatch.setattr(shield, "ENFORCE_BAN", False)
+    assert shield.resolve_mode(guild_id) == "alert"
+
+
+def test_resolve_mode_db_setting_overrides_env(monkeypatch):
+    guild_id = 900000000000000003
+    monkeypatch.setattr(shield, "ENFORCE_BAN", True)
+    shield.store.set_mode(guild_id, "alert")
+    assert shield.resolve_mode(guild_id) == "alert"
+    guild_id2 = 900000000000000004
+    monkeypatch.setattr(shield, "ENFORCE_BAN", False)
+    shield.store.set_mode(guild_id2, "ban")
+    assert shield.resolve_mode(guild_id2) == "ban"
+
+
+def test_resolve_thresholds_falls_back_to_env_defaults(monkeypatch):
+    guild_id = 900000000000000005
+    monkeypatch.setattr(shield, "THRESHOLD_BAN", 7)
+    monkeypatch.setattr(shield, "THRESHOLD_ALERT", 15)
+    assert shield.resolve_thresholds(guild_id) == (7, 15)
+
+
+def test_resolve_thresholds_db_setting_overrides_env(monkeypatch):
+    guild_id = 900000000000000006
+    monkeypatch.setattr(shield, "THRESHOLD_BAN", 7)
+    monkeypatch.setattr(shield, "THRESHOLD_ALERT", 15)
+    shield.store.set_thresholds(guild_id, 2, 20)
+    assert shield.resolve_thresholds(guild_id) == (2, 20)
+
+
+def test_resolve_thresholds_partial_db_override(monkeypatch):
+    guild_id = 900000000000000007
+    monkeypatch.setattr(shield, "THRESHOLD_BAN", 7)
+    monkeypatch.setattr(shield, "THRESHOLD_ALERT", 15)
+    shield.store.set_thresholds(guild_id, 3, None)
+    assert shield.resolve_thresholds(guild_id) == (3, 15)
+
+
+def test_ban_mode_check_blocks_without_ban_permission():
+    allowed, message = shield.ban_mode_check(False, 5, 5)
+    assert allowed is False
+    assert "Ban Members" in message
+
+
+def test_ban_mode_check_allows_when_role_is_high_enough():
+    allowed, message = shield.ban_mode_check(True, 10, 5)
+    assert allowed is True
+    assert message == ""
+
+
+def test_ban_mode_check_allows_but_warns_when_role_is_low():
+    allowed, message = shield.ban_mode_check(True, 3, 10)
+    assert allowed is True
+    assert message != ""
+    assert "Avatar Shield" in message
+
+
+def test_ban_mode_check_equal_position_is_not_a_warning():
+    allowed, message = shield.ban_mode_check(True, 5, 5)
+    assert allowed is True
+    assert message == ""

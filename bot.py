@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Avatar Shield — standalone admin-impersonation detector (alert-only tier).
+Avatar Shield — self-serve, multi-server admin-impersonation detector.
 
 Scammers copy your admins' profile pictures to DM your members with fake
 "support" / "airdrop" links. Name filters miss this — they change the name,
@@ -8,28 +8,42 @@ not the face. Avatar Shield fingerprints every server admin's avatar with a
 perceptual hash and posts a mod-log alert when a member shows up wearing a
 close copy — even a re-encoded or lightly-cropped one.
 
-This free tier is ALERT-ONLY: it never bans, mutes, or touches anyone. It just
-tells you. Flip ENFORCE_BAN=true once you trust it and the bot has Ban Members.
+This free tier is ALERT-ONLY by default: it never bans, mutes, or touches
+anyone. It just tells you. Run `/shield mode mode:ban` once you trust it and
+the bot has Ban Members.
 
-Setup
------
+Self-serve setup (any server owner, no redeploy)
+-------------------------------------------------
+1. Click the "Add to Discord" invite link in the README, authorize it.
+2. In your server: `/shield setup channel:#your-alert-channel`.
+3. (optional) `/shield protect user:@someone` to protect a non-admin face.
+4. `/shield status` any time to see the current config.
+
+Every setting above is stored per-server in SQLite (see AVATAR_SHIELD_DB
+below) and overrides the env vars for that server only. The env vars below
+remain the defaults for any server that hasn't configured itself — that's
+what keeps the original deployment working unchanged.
+
+Operator setup (env vars — defaults/fallbacks only)
+----------------------------------------------------
 1. pip install -r requirements.txt
 2. Discord Developer Portal -> your app -> Bot -> enable the
    **Server Members Intent** (privileged). Without it the bot can't see joins
    or avatar changes.
 3. Copy .env.example to .env and fill in:
      DISCORD_BOT_TOKEN=...        # bot token
+     AVATAR_SHIELD_DB=...         # sqlite path for per-server settings (default /data/avatar-shield.db)
      MOD_LOG_CHANNEL_ID=...       # default channel where alerts are posted
      MOD_LOG_CHANNELS=...         # optional per-guild override, guild:channel,...
-     PROTECTED_USER_IDS=...       # optional extra faces to protect (non-admins)
-     ENFORCE_BAN=false            # true = auto-ban ban-tier matches (needs Ban perm)
+     PROTECTED_USER_IDS=...       # optional extra faces to protect (non-admins), global
+     ENFORCE_BAN=false            # default mode for guilds with no /shield mode setting
      THRESHOLD_BAN=6              # <= this distance = ban tier
      THRESHOLD_ALERT=10           # <= this distance = alert tier
 4. python bot.py
 
 The protected set is derived automatically from anyone with the Administrator
-permission, plus anyone named in PROTECTED_USER_IDS — warmed at startup and
-refreshed hourly. No database required; the cache lives in memory.
+permission, plus anyone named in PROTECTED_USER_IDS or added per-server via
+`/shield protect` — warmed at startup and refreshed hourly.
 """
 from __future__ import annotations
 
@@ -44,7 +58,10 @@ from typing import Iterable, Optional
 
 import discord
 import imagehash
+from discord import app_commands
 from PIL import Image, UnidentifiedImageError
+
+import settings_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("avatar-shield")
@@ -144,6 +161,59 @@ DISCOVER_CHANNEL_NAMES: tuple[str, ...] = (
     "alerts",
 )
 
+# ---- Per-server settings (SQLite) ----------------------------------------
+# Every server that self-configures via /shield gets its own row here. A
+# server that never touches /shield keeps behaving exactly like before —
+# every lookup here falls through to the env vars above when a guild has no
+# saved setting. AVATAR_SHIELD_DB should point at a mounted persistent volume
+# (Railway volume, Fly volume, a host bind-mount) or settings are lost on
+# every restart/redeploy.
+AVATAR_SHIELD_DB = settings_store.resolve_db_path(
+    os.environ.get("AVATAR_SHIELD_DB", "/data/avatar-shield.db").strip()
+    or "/data/avatar-shield.db"
+)
+store = settings_store.SettingsStore(AVATAR_SHIELD_DB)
+
+
+def resolve_mode(guild_id: int) -> str:
+    """Per-guild mode: DB setting -> ENFORCE_BAN env -> "alert" default."""
+    saved = store.get(guild_id).mode
+    if saved is not None:
+        return saved
+    return "ban" if ENFORCE_BAN else "alert"
+
+
+def resolve_thresholds(guild_id: int) -> tuple[int, int]:
+    """Per-guild thresholds: DB setting -> THRESHOLD_* env defaults."""
+    settings = store.get(guild_id)
+    ban = settings.threshold_ban if settings.threshold_ban is not None else THRESHOLD_BAN
+    alert = settings.threshold_alert if settings.threshold_alert is not None else THRESHOLD_ALERT
+    return ban, alert
+
+
+def ban_mode_check(has_ban_permission: bool, bot_role_position: int, highest_role_position: int) -> tuple[bool, str]:
+    """Pure. Can this guild's bot switch to ban mode?
+
+    Returns (allowed, message). allowed=False blocks the switch and message
+    explains why. allowed=True with a non-empty message is an advisory
+    warning only (the switch still goes through) — a low bot role means
+    individual bans can still fail later, but that's a per-member fact we
+    can't fully know ahead of time.
+    """
+    if not has_ban_permission:
+        return False, (
+            "I don't have the **Ban Members** permission in this server yet. "
+            "Grant it to my role in Server Settings -> Roles, then run this again."
+        )
+    if bot_role_position < highest_role_position:
+        return True, (
+            "My role isn't at the top of your role list. Discord won't let me ban "
+            "anyone whose top role sits above mine — drag **Avatar Shield** higher in "
+            "Server Settings -> Roles for it to work on everyone."
+        )
+    return True, ""
+
+
 # ---- pHash constants -----------------------------------------------------
 PHASH_SIZE = 8                    # 8x8 = 64-bit fingerprint
 ADMIN_HASH_TTL_S = 3600           # refresh admin fingerprints hourly
@@ -212,7 +282,9 @@ def _is_admin(member: discord.Member) -> bool:
 
 def _is_protected(member: discord.Member) -> bool:
     """Members who ARE the protected set — never flagged for their own face."""
-    return member.id in PROTECTED_USER_IDS or _is_admin(member)
+    if member.id in PROTECTED_USER_IDS or _is_admin(member):
+        return True
+    return member.id in store.get(member.guild.id).protected_user_ids
 
 
 # ---- pHash computation ---------------------------------------------------
@@ -254,11 +326,13 @@ async def _compute_phash(member: discord.abc.User) -> Optional[imagehash.ImageHa
 # ---- Admin cache ---------------------------------------------------------
 async def _refresh_protected(guild: discord.Guild) -> _GuildCache:
     cache = _GuildCache(refreshed_at=time.time())
+    guild_protected_ids = store.get(guild.id).protected_user_ids
+    all_protected_ids = PROTECTED_USER_IDS | guild_protected_ids
     people: list[tuple[discord.Member, str]] = []
     for m in guild.members:
         if m.bot or not _has_custom_avatar(m):
             continue
-        if m.id in PROTECTED_USER_IDS:
+        if m.id in all_protected_ids:
             people.append((m, "listed"))
         elif _is_admin(m):
             people.append((m, "admin"))
@@ -276,10 +350,10 @@ async def _refresh_protected(guild: discord.Guild) -> _GuildCache:
         "guild %s (%s): cached %d protected fingerprints (%d admin, %d listed)",
         guild.id, guild.name, len(cache.protected), len(cache.protected) - listed, listed,
     )
-    missing = PROTECTED_USER_IDS - {m.id for m, _ in people}
+    missing = all_protected_ids - {m.id for m, _ in people}
     if missing:
         log.warning(
-            "guild %s (%s): PROTECTED_USER_IDS %s are not members here (or have no "
+            "guild %s (%s): protected user id(s) %s are not members here (or have no "
             "avatar) — their face is NOT protected in this server",
             guild.id, guild.name, ", ".join(str(i) for i in sorted(missing)),
         )
@@ -331,13 +405,28 @@ async def check_member(member: discord.Member) -> Optional[AvatarMatch]:
     if mhash is None:
         return None
 
-    return best_match(mhash, cache.protected, exclude_user_id=member.id)
+    threshold_ban, threshold_alert = resolve_thresholds(member.guild.id)
+    return best_match(
+        mhash, cache.protected, exclude_user_id=member.id,
+        threshold_ban=threshold_ban, threshold_alert=threshold_alert,
+    )
 
 
 # ---- Bot -----------------------------------------------------------------
 intents = discord.Intents.default()
 intents.members = True  # REQUIRED — join + avatar-change events
-bot = discord.Client(intents=intents)
+
+
+class AvatarShieldClient(discord.Client):
+    async def setup_hook(self) -> None:
+        # Global sync so /shield works in every server, including ones that
+        # join after this boot — no per-guild sync, no redeploy needed.
+        synced = await tree.sync()
+        log.info("synced %d slash command(s) globally", len(synced))
+
+
+bot = AvatarShieldClient(intents=intents)
+tree = app_commands.CommandTree(bot)
 
 
 def _can_post(guild: discord.Guild, channel: discord.TextChannel) -> bool:
@@ -356,10 +445,12 @@ def _text_channel(guild: discord.Guild, channel_id: int) -> Optional[discord.Tex
 def resolve_mod_log(guild: discord.Guild) -> Optional[discord.TextChannel]:
     """Find this guild's mod-log channel.
 
-    Order: explicit per-guild mapping -> the global default (only if it really
-    lives in *this* guild) -> a conventionally-named channel the bot can post
-    in. The middle step is what stops a second server from silently swallowing
-    every alert, because ``guild.get_channel`` on another guild's id is None.
+    Order: this guild's own `/shield setup` setting (SQLite) -> explicit
+    per-guild env mapping -> the global env default (only if it really lives
+    in *this* guild) -> a conventionally-named channel the bot can post in.
+    The env steps are what let the original single-server deployment keep
+    working with zero config changes; DB always wins once a server has run
+    `/shield setup` for itself.
     """
     cached = _mod_log_resolved.get(guild.id)
     if cached is not None:
@@ -367,6 +458,24 @@ def resolve_mod_log(guild: discord.Guild) -> Optional[discord.TextChannel]:
         if ch is not None:
             return ch
         _mod_log_resolved.pop(guild.id, None)  # deleted — re-resolve below
+
+    guild_setting = store.get(guild.id).mod_log_channel_id
+    if guild_setting is not None:
+        ch = _text_channel(guild, guild_setting)
+        if ch is None:
+            log.warning(
+                "guild %s (%s): /shield setup points at channel %s, which this bot cannot see",
+                guild.id, guild.name, guild_setting,
+            )
+        else:
+            if not _can_post(guild, ch):
+                log.warning(
+                    "guild %s (%s): #%s is configured but the bot lacks "
+                    "View Channel / Send Messages / Embed Links there",
+                    guild.id, guild.name, ch.name,
+                )
+            _mod_log_resolved[guild.id] = ch.id
+            return ch
 
     explicit = MOD_LOG_CHANNELS.get(guild.id)
     if explicit is not None:
@@ -425,8 +534,9 @@ async def _post_and_maybe_ban(member: discord.Member, match: AvatarMatch, trigge
     impersonated = member.guild.get_member(match.impersonated_user_id)
     target = f"{impersonated.mention} (`{impersonated}`)" if impersonated else f"user {match.impersonated_user_id}"
 
+    mode = resolve_mode(member.guild.id)
     banned = False
-    if match.severity == "ban" and ENFORCE_BAN:
+    if match.severity == "ban" and mode == "ban":
         try:
             await member.ban(
                 reason=f"Avatar impersonation of protected member {match.impersonated_user_id} "
@@ -446,10 +556,11 @@ async def _post_and_maybe_ban(member: discord.Member, match: AvatarMatch, trigge
     else:
         title, color, action = "👁️ Avatar similarity alert", 0xFDD835, "Alert only — review"
 
+    threshold_ban, threshold_alert = resolve_thresholds(member.guild.id)
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="User", value=f"{member.mention} (`{member}` · `{member.id}`)", inline=False)
     embed.add_field(name="Resembles protected member", value=target, inline=False)
-    embed.add_field(name="pHash distance", value=f"**{match.distance}** (ban ≤{THRESHOLD_BAN}, alert ≤{THRESHOLD_ALERT})", inline=True)
+    embed.add_field(name="pHash distance", value=f"**{match.distance}** (ban ≤{threshold_ban}, alert ≤{threshold_alert})", inline=True)
     embed.add_field(name="Action", value=action, inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"trigger: {trigger}")
@@ -511,20 +622,22 @@ async def _warm_up(guilds: Optional[Iterable[discord.Guild]] = None) -> None:
             continue
 
         channel = resolve_mod_log(guild)
+        mode = resolve_mode(guild.id)
+        threshold_ban, threshold_alert = resolve_thresholds(guild.id)
         log.info(
-            "guild %s (%s): mod-log=%s, protected=%d, enforce_ban=%s",
+            "guild %s (%s): mod-log=%s, protected=%d, mode=%s",
             guild.id, guild.name,
             f"#{channel.name}" if channel else "NONE",
-            len(cache.protected), ENFORCE_BAN,
+            len(cache.protected), mode,
         )
         if STARTUP_NOTICE and channel is not None:
-            mode = "auto-ban armed" if ENFORCE_BAN else "alert-only"
+            mode_txt = "auto-ban armed" if mode == "ban" else "alert-only"
             embed = discord.Embed(
                 title="🛡️ Avatar Shield online",
                 description=(
                     f"Watching **{len(cache.protected)}** protected avatar"
-                    f"{'' if len(cache.protected) == 1 else 's'} in **{guild.name}** — {mode}.\n"
-                    f"Ban ≤{THRESHOLD_BAN} · alert ≤{THRESHOLD_ALERT} pHash distance."
+                    f"{'' if len(cache.protected) == 1 else 's'} in **{guild.name}** — {mode_txt}.\n"
+                    f"Ban ≤{threshold_ban} · alert ≤{threshold_alert} pHash distance."
                 ),
                 color=0x43A047,
                 timestamp=datetime.now(timezone.utc),
@@ -535,12 +648,55 @@ async def _warm_up(guilds: Optional[Iterable[discord.Guild]] = None) -> None:
                 log.warning("startup notice failed in guild %s: %s", guild.id, e)
 
 
+async def _find_welcome_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    """System channel if postable, else the first channel the bot can post in."""
+    if guild.system_channel is not None and _can_post(guild, guild.system_channel):
+        return guild.system_channel
+    for ch in guild.text_channels:
+        if _can_post(guild, ch):
+            return ch
+    return None
+
+
+async def _post_onboarding(guild: discord.Guild) -> None:
+    """Welcome card for a server that just added the bot — the whole self-serve pitch.
+
+    No env edit, no redeploy, no help from us: two slash commands and this
+    server is configured. Posted once, on join.
+    """
+    channel = await _find_welcome_channel(guild)
+    if channel is None:
+        log.warning(
+            "guild %s (%s): joined but there's nowhere the bot can post an onboarding message",
+            guild.id, guild.name,
+        )
+        return
+    embed = discord.Embed(
+        title="🛡️ Avatar Shield is watching",
+        description=(
+            "I catch scammers who copy your admins' **profile pictures** to impersonate "
+            "them. **Alert-only by default** — I never ban, mute, or touch anyone until "
+            "you say so.\n\n"
+            "**Get set up (2 steps):**\n"
+            "1️⃣ `/shield setup` — pick the channel where alerts post.\n"
+            "2️⃣ *(optional)* `/shield protect` — protect a face beyond your Administrators.\n\n"
+            "Run `/shield status` any time to see your current config, or `/shield test` "
+            "to see a sample alert card."
+        ),
+        color=0x43A047,
+    )
+    try:
+        await channel.send(embed=embed)
+    except Exception as e:  # noqa: BLE001
+        log.warning("onboarding post failed in guild %s: %s", guild.id, e)
+
+
 @bot.event
 async def on_ready():
     global _warmed_up
     log.info(
-        "Avatar Shield online as %s — %d guild(s), enforce_ban=%s",
-        bot.user, len(bot.guilds), ENFORCE_BAN,
+        "Avatar Shield online as %s — %d guild(s)",
+        bot.user, len(bot.guilds),
     )
     if not intents.members:
         log.error("Server Members Intent is OFF — the bot is deaf to joins and avatar changes.")
@@ -556,6 +712,7 @@ async def on_guild_join(guild: discord.Guild):
     _invalidate(guild.id)
     _mod_log_resolved.pop(guild.id, None)
     await _warm_up([guild])
+    await _post_onboarding(guild)
 
 
 @bot.event
@@ -600,6 +757,182 @@ async def on_user_update(before: discord.User, after: discord.User):
         await _check(m, trigger="global_avatar_change")
 
 
+# ---- Slash commands (/shield) --------------------------------------------
+# Manage Server is the default requirement (server owners can further
+# restrict it themselves in Integrations settings). guild_only=True keeps
+# every subcommand out of DMs, since all of them act on one specific server.
+shield_group = app_commands.Group(
+    name="shield",
+    description="Configure Avatar Shield for this server",
+    default_permissions=discord.Permissions(manage_guild=True),
+    guild_only=True,
+)
+
+SCAN_MAX_MEMBERS = 500
+SCAN_BATCH_SIZE = 10
+SCAN_BATCH_DELAY_S = 1.0
+
+
+@shield_group.command(name="setup", description="Set the channel where Avatar Shield posts alerts")
+@app_commands.describe(channel="Text channel for impersonation alerts")
+async def shield_setup(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    guild = interaction.guild
+    assert guild is not None  # guild_only=True guarantees this
+    if not _can_post(guild, channel):
+        await interaction.response.send_message(
+            f"I can't post in {channel.mention} — grant my role View Channel, "
+            "Send Messages, and Embed Links there (green ✅, not the gray neutral "
+            "toggle), then run this again.",
+            ephemeral=True,
+        )
+        return
+    store.set_mod_log_channel(guild.id, channel.id)
+    _mod_log_resolved.pop(guild.id, None)
+    await interaction.response.send_message(
+        f"✅ Alerts will post in {channel.mention}.", ephemeral=True
+    )
+
+
+@shield_group.command(name="protect", description="Protect an extra member's face, beyond Administrators")
+@app_commands.describe(user="Member whose avatar should be protected")
+async def shield_protect(interaction: discord.Interaction, user: discord.Member) -> None:
+    guild = interaction.guild
+    assert guild is not None
+    store.add_protected_user(guild.id, user.id)
+    _invalidate(guild.id)
+    await interaction.response.send_message(
+        f"🛡️ {user.mention}'s avatar is now protected in this server.", ephemeral=True
+    )
+
+
+@shield_group.command(name="unprotect", description="Stop protecting an extra member's face")
+@app_commands.describe(user="Member to stop protecting")
+async def shield_unprotect(interaction: discord.Interaction, user: discord.Member) -> None:
+    guild = interaction.guild
+    assert guild is not None
+    store.remove_protected_user(guild.id, user.id)
+    _invalidate(guild.id)
+    await interaction.response.send_message(
+        f"{user.mention} is no longer specially protected (Administrators still are).",
+        ephemeral=True,
+    )
+
+
+@shield_group.command(name="mode", description="Alert-only, or auto-ban ban-tier matches")
+@app_commands.describe(mode="alert = never touches anyone. ban = auto-bans ban-tier matches.")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="alert — never bans, just posts", value="alert"),
+    app_commands.Choice(name="ban — auto-bans ban-tier matches", value="ban"),
+])
+async def shield_mode(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+    guild = interaction.guild
+    assert guild is not None
+    if mode.value == "ban":
+        me = guild.me
+        has_ban = bool(me and me.guild_permissions.ban_members)
+        bot_pos = me.top_role.position if me else 0
+        highest = max((r.position for r in guild.roles), default=0)
+        allowed, message = ban_mode_check(has_ban, bot_pos, highest)
+        if not allowed:
+            await interaction.response.send_message(f"⚠️ {message}", ephemeral=True)
+            return
+        store.set_mode(guild.id, "ban")
+        reply = "🚨 Mode set to **ban** — ban-tier matches are now auto-banned."
+        if message:
+            reply += f"\n\n⚠️ {message}"
+        await interaction.response.send_message(reply, ephemeral=True)
+        return
+    store.set_mode(guild.id, "alert")
+    await interaction.response.send_message(
+        "👁️ Mode set to **alert** — I'll post matches for review and never touch anyone.",
+        ephemeral=True,
+    )
+
+
+@shield_group.command(name="status", description="Show Avatar Shield's current configuration for this server")
+async def shield_status(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    assert guild is not None
+    await interaction.response.defer(ephemeral=True)
+    channel = resolve_mod_log(guild)
+    mode = resolve_mode(guild.id)
+    threshold_ban, threshold_alert = resolve_thresholds(guild.id)
+    cache = await _get_cache(guild)
+    embed = discord.Embed(title="🛡️ Avatar Shield status", color=0x5865F2)
+    embed.add_field(name="Alert channel", value=channel.mention if channel else "⚠️ not set — run `/shield setup`", inline=False)
+    embed.add_field(name="Mode", value="🚨 ban" if mode == "ban" else "👁️ alert-only", inline=True)
+    embed.add_field(name="Protected faces", value=str(len(cache.protected)), inline=True)
+    embed.add_field(name="Thresholds", value=f"ban ≤{threshold_ban} · alert ≤{threshold_alert}", inline=True)
+    embed.add_field(
+        name="Members intent",
+        value="✅ on" if intents.members else "❌ off — the bot can't see joins or avatar changes",
+        inline=False,
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@shield_group.command(name="test", description="Post a sample alert card to confirm your setup")
+async def shield_test(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    assert guild is not None
+    channel = resolve_mod_log(guild)
+    if channel is None:
+        await interaction.response.send_message(
+            "No alert channel is configured yet — run `/shield setup` first.", ephemeral=True
+        )
+        return
+    threshold_ban, threshold_alert = resolve_thresholds(guild.id)
+    embed = discord.Embed(
+        title="👁️ Avatar similarity alert (TEST)",
+        description="This is a sample alert card — no real match was found.",
+        color=0xFDD835,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="User", value=f"{interaction.user.mention} (`{interaction.user}`)", inline=False)
+    embed.add_field(name="Resembles protected member", value="example admin", inline=False)
+    embed.add_field(name="pHash distance", value=f"**3** (ban ≤{threshold_ban}, alert ≤{threshold_alert})", inline=True)
+    embed.add_field(name="Action", value="Alert only — review", inline=True)
+    embed.set_footer(text="trigger: /shield test")
+    try:
+        await channel.send(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"I can't post in {channel.mention} — check my permissions there.", ephemeral=True
+        )
+        return
+    await interaction.response.send_message(f"✅ Sample alert posted in {channel.mention}.", ephemeral=True)
+
+
+@shield_group.command(name="scan", description="Re-check current members against protected faces right now")
+async def shield_scan(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    assert guild is not None
+    candidates = [m for m in guild.members if not m.bot and not _is_protected(m)][:SCAN_MAX_MEMBERS]
+    await interaction.response.send_message(
+        f"🔍 Scanning {len(candidates)} member(s) — this may take a minute...", ephemeral=True
+    )
+    hits = 0
+    for i in range(0, len(candidates), SCAN_BATCH_SIZE):
+        batch = candidates[i:i + SCAN_BATCH_SIZE]
+        for m in batch:
+            try:
+                match = await check_member(m)
+                if match is not None:
+                    await _post_and_maybe_ban(m, match, trigger="manual_scan")
+                    hits += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("scan check failed for %s: %s", m, e)
+        if i + SCAN_BATCH_SIZE < len(candidates):
+            await asyncio.sleep(SCAN_BATCH_DELAY_S)
+    await interaction.followup.send(
+        f"✅ Scan complete — checked {len(candidates)} member(s), {hits} alert(s) raised.",
+        ephemeral=True,
+    )
+
+
+tree.add_command(shield_group)
+
+
 def main() -> None:
     token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
     if not token:
@@ -608,13 +941,15 @@ def main() -> None:
             "or export the variable before starting."
         )
     if MOD_LOG_CHANNEL_ID is None and not MOD_LOG_CHANNELS:
-        log.warning(
-            "Neither MOD_LOG_CHANNEL_ID nor MOD_LOG_CHANNELS is set — the bot will "
-            "try to auto-discover a channel named one of: %s",
+        log.info(
+            "Neither MOD_LOG_CHANNEL_ID nor MOD_LOG_CHANNELS is set — servers that "
+            "haven't run /shield setup will fall back to auto-discovering a channel "
+            "named one of: %s",
             ", ".join(DISCOVER_CHANNEL_NAMES),
         )
     if PROTECTED_USER_IDS:
-        log.info("PROTECTED_USER_IDS: %s", ", ".join(str(i) for i in sorted(PROTECTED_USER_IDS)))
+        log.info("PROTECTED_USER_IDS (global): %s", ", ".join(str(i) for i in sorted(PROTECTED_USER_IDS)))
+    log.info("settings DB: %s", AVATAR_SHIELD_DB)
     bot.run(token)
 
 
